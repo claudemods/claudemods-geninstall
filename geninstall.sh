@@ -1,9 +1,9 @@
 #!/bin/bash
 
-# Gentoo Installation Script - Local Stage3 Version
+# Gentoo Installation Script - Final Corrected Version
 set -e
 
-# Verify root
+# Verify root and parameters
 [ "$(id -u)" -ne 0 ] && echo "Run as root!" && exit 1
 [ -z "$1" ] && echo "Usage: $0 <target_disk> (e.g., /dev/sda)" && exit 1
 
@@ -14,7 +14,7 @@ ROOT_PART="${TARGET_DISK}2"
 SWAP_PART="${TARGET_DISK}3"
 
 # Find local stage3
-STAGE3_FILE=$(ls stage3-*.tar.xz 2>/dev/null | head -n1)
+STAGE3_FILE=$(ls stage3-amd64-openrc-*.tar.xz 2>/dev/null | head -n1)
 [ -z "$STAGE3_FILE" ] && echo "No stage3 tarball found!" && exit 1
 
 # Confirmation
@@ -75,8 +75,14 @@ set -e
 source /etc/profile
 
 # Basic setup
-emerge-webrsync
-eselect profile set default/linux/amd64/17.1
+emerge-webrsync || emerge --sync
+
+# Use current stable profile instead of hardcoded one
+CURRENT_PROFILE=$(eselect profile list | grep 'default/linux/amd64/' | grep -v hardened | grep -v selinux | grep stable | awk '{print $2}' | head -n1)
+[ -z "$CURRENT_PROFILE" ] && CURRENT_PROFILE="default/linux/amd64/17.1"
+eselect profile set "$CURRENT_PROFILE"
+
+# System configuration
 echo "America/New_York" > /etc/timezone
 emerge --config sys-libs/timezone-data
 echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen
@@ -95,14 +101,26 @@ grub-install --target=x86_64-efi --efi-directory=/boot
 grub-mkconfig -o /boot/grub/grub.cfg
 
 # Final setup
+echo "Set root password:"
 passwd
 emerge app-admin/sysklogd sys-process/cronie net-misc/dhcpcd
 rc-update add sysklogd default
 rc-update add cronie default
 rc-update add dhcpcd default
 emerge --depclean
+
+# Read news items if any
+if [ $(eselect news count unread) -gt 0 ]; then
+    echo "There are unread news items:"
+    eselect news list
+    echo "Use 'eselect news read' to view them"
+fi
 CHROOT_EOF
 
 # Cleanup
 umount -R /mnt/gentoo
 echo "Installation complete! Reboot when ready."
+echo "Don't forget to:"
+echo "1. Create a user account (useradd -m -G users,wheel,audio,video username)"
+echo "2. Configure your network if needed"
+echo "3. Read any news items with 'eselect news read'"
