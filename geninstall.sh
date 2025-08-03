@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Gentoo Installation Script - Final Corrected Version
+# Gentoo Installation Script - Final Robust Version
 set -e
 
 # Verify root and parameters
@@ -57,6 +57,7 @@ CXXFLAGS="\${COMMON_FLAGS}"
 MAKEOPTS="-j$(nproc)"
 GENTOO_MIRRORS="https://gentoo.osuosl.org/"
 FEATURES="parallel-fetch parallel-install"
+ACCEPT_LICENSE="*"
 EOF
 
 cp /etc/resolv.conf /mnt/gentoo/etc/
@@ -77,8 +78,14 @@ source /etc/profile
 # Basic setup
 emerge-webrsync || emerge --sync
 
-# Use current stable profile instead of hardcoded one
-CURRENT_PROFILE=$(eselect profile list | grep 'default/linux/amd64/' | grep -v hardened | grep -v selinux | grep stable | awk '{print $2}' | head -n1)
+# Handle news items
+if [ $(eselect news count unread) -gt 0 ]; then
+    echo "Reading news items..."
+    eselect news read > /dev/null
+fi
+
+# Use current stable profile
+CURRENT_PROFILE=$(eselect profile list | grep 'default/linux/amd64' | grep -v hardened | grep -v selinux | grep stable | awk '{print $2}' | head -n1)
 [ -z "$CURRENT_PROFILE" ] && CURRENT_PROFILE="default/linux/amd64/17.1"
 eselect profile set "$CURRENT_PROFILE"
 
@@ -90,10 +97,17 @@ locale-gen
 eselect locale set en_US.utf8
 env-update && source /etc/profile
 
+# Accept linux-firmware license
+mkdir -p /etc/portage/package.license
+echo "sys-kernel/linux-firmware linux-fw-redistributable" > /etc/portage/package.license/firmware
+
 # Kernel and tools
-emerge sys-kernel/gentoo-sources sys-kernel/genkernel linux-firmware
+emerge sys-kernel/gentoo-sources sys-kernel/genkernel
 cd /usr/src/linux
 genkernel all --install
+
+# Install firmware separately with accepted license
+emerge sys-kernel/linux-firmware
 
 # Bootloader
 emerge sys-boot/grub
@@ -108,13 +122,6 @@ rc-update add sysklogd default
 rc-update add cronie default
 rc-update add dhcpcd default
 emerge --depclean
-
-# Read news items if any
-if [ $(eselect news count unread) -gt 0 ]; then
-    echo "There are unread news items:"
-    eselect news list
-    echo "Use 'eselect news read' to view them"
-fi
 CHROOT_EOF
 
 # Cleanup
@@ -123,4 +130,4 @@ echo "Installation complete! Reboot when ready."
 echo "Don't forget to:"
 echo "1. Create a user account (useradd -m -G users,wheel,audio,video username)"
 echo "2. Configure your network if needed"
-echo "3. Read any news items with 'eselect news read'"
+echo "3. Check remaining news items with 'eselect news list'"
