@@ -1,2 +1,2 @@
 # claudemods-geninstall
-an attempt to create a bash to install gentoo
+an attempt to create a bash script to install gentoo
