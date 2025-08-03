@@ -1,12 +1,13 @@
 #!/bin/bash
 
-# Gentoo Installation Script
+# Gentoo Installation Script - Corrected Version
 # This script automates the installation of Gentoo Linux with:
 # - FAT32 boot partition (for UEFI systems)
 # - EXT4 root partition
 # - Basic system configuration
 
-# Safety checks
+# Safety checks and setup
+set -e  # Exit on error
 if [ "$(id -u)" -ne 0 ]; then
     echo "This script must be run as root!"
     exit 1
@@ -37,6 +38,9 @@ if [ "$answer" != "y" ] && [ "$answer" != "Y" ]; then
     exit 1
 fi
 
+# Create directory structure
+mkdir -p /mnt/gentoo
+
 # Set up partitions
 echo "Partitioning $TARGET_DISK..."
 parted -s "$TARGET_DISK" mklabel gpt
@@ -48,7 +52,7 @@ parted -s "$TARGET_DISK" mkpart primary linux-swap 20GiB 24GiB
 # Format partitions
 echo "Formatting partitions..."
 mkfs.fat -F32 "$BOOT_PART"
-mkfs.ext4 "$ROOT_PART"
+mkfs.ext4 -F "$ROOT_PART"
 mkswap "$SWAP_PART"
 swapon "$SWAP_PART"
 
@@ -58,21 +62,33 @@ mount "$ROOT_PART" /mnt/gentoo
 mkdir -p /mnt/gentoo/boot
 mount "$BOOT_PART" /mnt/gentoo/boot
 
-# Set the stage3 tarball URL (adjust as needed)
-STAGE3_URL="https://distfiles.gentoo.org/releases/amd64/autobuilds/latest-stage3-amd64-openrc.txt"
-STAGE3_FILE=$(curl -s "$STAGE3_URL" | grep -v "^#" | awk '{print $1}')
-STAGE3_URL="https://distfiles.gentoo.org/releases/amd64/autobuilds/$STAGE3_FILE"
+# Get latest stage3 URL
+echo "Fetching latest stage3 URL..."
+STAGE3_BASE_URL="https://distfiles.gentoo.org/releases/amd64/autobuilds"
+LATEST_STAGE3=$(curl -s "${STAGE3_BASE_URL}/latest-stage3-amd64-openrc.txt" | grep -v "^#" | awk '{print $1}')
+STAGE3_URL="${STAGE3_BASE_URL}/${LATEST_STAGE3}"
+STAGE3_FILENAME=$(basename "$LATEST_STAGE3")
 
 # Download and extract stage3
 echo "Downloading stage3 tarball..."
 cd /mnt/gentoo || exit
 wget "$STAGE3_URL"
+if [ ! -f "$STAGE3_FILENAME" ]; then
+    echo "Failed to download stage3 tarball!"
+    exit 1
+fi
+
 echo "Extracting stage3..."
-tar xpvf stage3-*.tar.xz --xattrs-include='*.*' --numeric-owner
+tar xpvf "$STAGE3_FILENAME" --xattrs-include='*.*' --numeric-owner
+if [ $? -ne 0 ]; then
+    echo "Failed to extract stage3 tarball!"
+    exit 1
+fi
 
 # Configure make.conf
 echo "Configuring make.conf..."
-CPU_FLAGS=$(cpuid2cpuflags | cut -d: -f2)
+mkdir -p /mnt/gentoo/etc/portage
+CPU_FLAGS=$(cpuid2cpuflags 2>/dev/null | cut -d: -f2 || echo "")
 NUM_JOBS=$(nproc)
 
 cat > /mnt/gentoo/etc/portage/make.conf << EOF
@@ -83,7 +99,7 @@ FCFLAGS="\${COMMON_FLAGS}"
 FFLAGS="\${COMMON_FLAGS}"
 
 MAKEOPTS="-j${NUM_JOBS}"
-CPU_FLAGS_X86="${CPU_FLAGS}"
+${CPU_FLAGS:+CPU_FLAGS_X86="${CPU_FLAGS}"}
 
 # Mirrors
 GENTOO_MIRRORS="https://gentoo.osuosl.org/ https://mirrors.rit.edu/gentoo/ https://gentoo.mirrors.evowise.com/"
@@ -98,9 +114,12 @@ EOF
 
 # DNS config
 echo "Copying DNS info..."
+mkdir -p /mnt/gentoo/etc
 cp --dereference /etc/resolv.conf /mnt/gentoo/etc/
 
 # Mount necessary filesystems
+echo "Mounting proc/sys/dev..."
+mkdir -p /mnt/gentoo/proc /mnt/gentoo/sys /mnt/gentoo/dev
 mount --types proc /proc /mnt/gentoo/proc
 mount --rbind /sys /mnt/gentoo/sys
 mount --make-rslave /mnt/gentoo/sys
@@ -112,10 +131,16 @@ echo "Chrooting into the new system..."
 cat << EOF | chroot /mnt/gentoo /bin/bash
 #!/bin/bash
 
-# Update portage tree
-emerge-webrsync
+set -e  # Exit on error
 
-# Select profile (change if needed)
+# Basic system setup
+source /etc/profile
+export PS1="(chroot) \$PS1"
+
+# Update portage tree
+emerge-webrsync || emerge --sync
+
+# Select profile
 eselect profile set default/linux/amd64/17.1
 
 # Timezone (change as needed)
@@ -131,7 +156,7 @@ env-update && source /etc/profile
 # Install kernel sources
 emerge sys-kernel/gentoo-sources sys-kernel/linux-firmware
 
-# Install genkernel for easier kernel setup
+# Install genkernel
 emerge sys-kernel/genkernel
 
 # Configure and compile kernel
@@ -161,8 +186,9 @@ EOF
 
 # Final steps
 echo "Installation complete!"
+umount -R /mnt/gentoo
 echo "You can now reboot into your new Gentoo system."
 echo "Don't forget to:"
-echo "1. Create a user account"
-echo "2. Configure your network"
+echo "1. Create a user account (useradd -m -G users,wheel,audio,video username)"
+echo "2. Configure your network if needed"
 echo "3. Install any additional packages you need"
