@@ -17,6 +17,20 @@ SWAP_SIZE_GIB=4
 TARGET=/mnt/gentoo
 [ -b "$TARGET_DISK" ] || { echo "$TARGET_DISK is not a disk!"; exit 1; }
 
+# Left out of the copy (same list as claudebackup-linux): host-specific files that stop a clean
+# boot, runtime/virtual filesystem contents and temporary files. Paths are relative to /.
+EXCLUDES="
+dev/*
+proc/*
+sys/*
+run/*
+tmp/*
+var/tmp/*
+mnt/*
+media/*
+lost+found
+"
+
 # /dev/sda -> /dev/sda1, /dev/nvme0n1 -> /dev/nvme0n1p1
 case "$TARGET_DISK" in *[0-9]) P="${TARGET_DISK}p" ;; *) P="$TARGET_DISK" ;; esac
 BIOS_PART="${P}1"     # 2 MiB bios_grub, lets the same disk boot on BIOS machines
@@ -88,15 +102,28 @@ mount "$ROOT_PART" "$TARGET"
 mkdir -p "$TARGET/boot/efi"
 mount "$EFI_PART" "$TARGET/boot/efi"
 
-# Copy the live system (instead of extracting a stage3)
+# Copy the live system (instead of extracting a stage3), minus the excludes
 echo "Copying the live system from ${LIVE_ROOT} (this takes a while)..."
 if command -v rsync >/dev/null 2>&1; then
-    rsync -aHAX --info=progress2 "$LIVE_ROOT/" "$TARGET/"
+    # read line by line so patterns like dev/* are not expanded against the current folder
+    RSYNC_EXCLUDES=()
+    while read -r e; do
+        if [ -n "$e" ]; then RSYNC_EXCLUDES+=(--exclude="/$e"); fi
+    done <<< "$EXCLUDES"
+    rsync -aHAX --info=progress2 "${RSYNC_EXCLUDES[@]}" "$LIVE_ROOT/" "$TARGET/"
 else
     cp -a "$LIVE_ROOT/." "$TARGET/"
+    # cp has no excludes: remove them from the copy instead
+    while read -r e; do
+        [ -n "$e" ] || continue
+        # globs (dev/*) expand here, inside the target only
+        for f in "$TARGET"/$e; do
+            if [ -e "$f" ] || [ -L "$f" ]; then rm -rf "$f"; fi
+        done
+    done <<< "$EXCLUDES"
 fi
-for d in proc sys dev run tmp mnt media; do mkdir -p "$TARGET/$d"; done
-chmod 1777 "$TARGET/tmp"
+for d in proc sys dev run tmp var/tmp mnt media; do mkdir -p "$TARGET/$d"; done
+chmod 1777 "$TARGET/tmp" "$TARGET/var/tmp"
 
 # Kernel: the one the live ISO is running (its modules are already in the copy)
 echo "Installing kernel ${KV}..."
@@ -116,7 +143,7 @@ for i in /mnt/cdrom/boot/gentoo.igz /run/initramfs/live/boot/gentoo.igz \
 done
 if [ -n "$LIVE_INITRD" ]; then cp "$LIVE_INITRD" "$TARGET/root/.cdb-live-initrd"; fi
 
-# fstab
+# fstab (excluded from the copy, written fresh for this disk)
 echo "Configuring..."
 uuid() { blkid -s UUID -o value "$1"; }
 cat > "$TARGET/etc/fstab" << EOF
@@ -125,8 +152,8 @@ UUID=$(uuid "$EFI_PART")	/boot/efi	vfat	defaults,noatime,umask=0077	0 2
 UUID=$(uuid "$SWAP_PART")	none	swap	sw	0 0
 EOF
 
-# Only used if GRUB is missing and has to be downloaded (binary package, no compiling)
-cp /etc/resolv.conf "$TARGET/etc/" 2>/dev/null || true
+# resolv.conf is excluded; the live one is only used if GRUB has to be downloaded, then removed
+cp /etc/resolv.conf "$TARGET/etc/resolv.conf" 2>/dev/null || true
 mkdir -p "$TARGET/etc/portage"
 grep -q '^GRUB_PLATFORMS=' "$TARGET/etc/portage/make.conf" 2>/dev/null ||
     echo 'GRUB_PLATFORMS="efi-64 pc"' >> "$TARGET/etc/portage/make.conf"
@@ -156,12 +183,12 @@ fi
 
 # System configuration
 echo "$NEW_HOSTNAME" > /etc/hostname
-[ -f /etc/conf.d/hostname ] && sed -i "s/^hostname=.*/hostname=\"$NEW_HOSTNAME\"/" /etc/conf.d/hostname
+if [ -f /etc/conf.d/hostname ]; then sed -i "s/^hostname=.*/hostname=\"$NEW_HOSTNAME\"/" /etc/conf.d/hostname; fi
 echo "$NEW_TZ" > /etc/timezone
 ln -sf "/usr/share/zoneinfo/$NEW_TZ" /etc/localtime
 
-# A fresh machine id for the new install
-rm -f /etc/machine-id /var/lib/dbus/machine-id
+# A fresh machine id for the new install (the live one was excluded)
+rm -f /var/lib/dbus/machine-id
 if command -v systemd-machine-id-setup >/dev/null 2>&1; then systemd-machine-id-setup; fi
 if command -v dbus-uuidgen >/dev/null 2>&1; then dbus-uuidgen --ensure; fi
 
@@ -220,6 +247,9 @@ if [ -n "$NEW_USER" ]; then
     echo "Set password for ${NEW_USER}:"
     chroot "$TARGET" passwd "$NEW_USER"
 fi
+
+# The live session's DNS settings were only needed for a possible GRUB download
+rm -f "$TARGET/etc/resolv.conf"
 
 # Cleanup
 trap - EXIT
